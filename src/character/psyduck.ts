@@ -18,10 +18,10 @@ export class Psyduck {
   parts: Part[] = [];
   B: Record<string, number> = {}; // bone ids by name
 
-  constructor(private gl: WebGL2RenderingContext) {
+  constructor(private gl?: WebGL2RenderingContext) {
     this.buildSkeleton();
     this.skel.bind();
-    this.buildMeshes();
+    if (gl) this.buildMeshes();
   }
 
   private bone(name: string, parent: string | null, x: number, y: number) {
@@ -54,7 +54,7 @@ export class Psyduck {
   }
 
   private add(name: string, data: ReturnType<typeof emptyMesh>, mat: Material) {
-    this.parts.push({ name, mesh: new SkinnedMesh(this.gl, data, mat) });
+    this.parts.push({ name, mesh: new SkinnedMesh(this.gl!, data, mat) });
   }
 
   private buildMeshes() {

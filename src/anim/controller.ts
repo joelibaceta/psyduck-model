@@ -82,6 +82,8 @@ export class Controller {
   update(dt: number, t: number) {
     this.phase += dt;
     this.reset();
+    this.view.scaleX = smooth(this.view.scaleX, 1, 18, dt);
+    this.view.scaleY = smooth(this.view.scaleY, 1, 18, dt);
 
     switch (this.behavior) {
       case 'walk_left': this.walk(dt, t, -1); break;
@@ -139,8 +141,9 @@ export class Controller {
   private walk(dt: number, t: number, dir: number) {
     this.facing = dir;
     const speed = 1.1;
-    this.worldX = clamp(this.worldX + dir * speed * dt, -X_LIMIT, X_LIMIT);
-    if ((dir < 0 && this.worldX <= -X_LIMIT) || (dir > 0 && this.worldX >= X_LIMIT)) {
+    const limit = Math.max(0, Math.min(X_LIMIT, this.view.unitsVisible * this.view.aspect / 2 - 1.4));
+    this.worldX = clamp(this.worldX + dir * speed * dt, -limit, limit);
+    if ((dir < 0 && this.worldX <= -limit) || (dir > 0 && this.worldX >= limit)) {
       this.trigger('idle'); return;
     }
     const cad = 2.1;

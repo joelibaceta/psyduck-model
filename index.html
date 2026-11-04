@@ -8,7 +8,8 @@
       :root { color-scheme: dark; }
       * { margin: 0; padding: 0; box-sizing: border-box; }
       html, body { width: 100%; height: 100%; overflow: hidden; background: #0b141b; font-family: system-ui, sans-serif; }
-      #app { position: fixed; inset: 0; }
+      #app { position: fixed; inset: 0; background: #629969 url('/forest.svg') center / cover no-repeat; }
+      #character { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
       #scene { display: block; width: 100%; height: 100%; }
 
       /* Chat UI */
@@ -17,8 +18,8 @@
         display: flex; gap: 8px; width: min(560px, 92vw); z-index: 10;
       }
       #chat input {
-        flex: 1; padding: 12px 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18);
-        background: rgba(10,20,28,.72); backdrop-filter: blur(8px);
+        flex: 1; padding: 12px 16px; border-radius: 18px; border: 1px solid rgba(255,255,255,.3);
+        background: rgba(20,48,35,.82); backdrop-filter: blur(8px);
         color: #eaf4ff; font-size: 15px; outline: none;
       }
       #chat input::placeholder { color: rgba(234,244,255,.45); }
@@ -58,7 +59,7 @@
       <div id="bubble"></div>
       <div id="status">iniciando…</div>
       <form id="chat" autocomplete="off">
-        <input id="chat-input" type="text" placeholder="Háblale a Psyduck… (hola, camina, salta, tócate la cabeza)" />
+        <input id="chat-input" type="text" placeholder="Háblale a Psyduck… hola, salta, baila" />
         <button type="submit">Enviar</button>
       </form>
     </div>

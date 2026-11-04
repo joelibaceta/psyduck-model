@@ -1,19 +1,17 @@
-import { createGL } from './gl/gl';
-import { Forest } from './background/forest';
+import { VectorPsyduck } from './vector/psyduck';
 import { Psyduck } from './character/psyduck';
 import { Controller, type Intent } from './anim/controller';
 import { Brain } from './brain/intent';
 import { psy } from './ui/sound';
 
-const canvas = document.getElementById('scene') as HTMLCanvasElement;
+document.getElementById('scene')!.remove();
 const statusEl = document.getElementById('status')!;
 const bubbleEl = document.getElementById('bubble')!;
 const form = document.getElementById('chat') as HTMLFormElement;
 const input = document.getElementById('chat-input') as HTMLInputElement;
 
-const gl = createGL(canvas);
-const forest = new Forest(gl);
-const psyduck = new Psyduck(gl);
+const psyduck = new Psyduck();
+const artwork = new VectorPsyduck(psyduck);
 const ctrl = new Controller(psyduck);
 const brain = new Brain();
 (window as any).ctrl = ctrl; // handy for console tinkering: ctrl.trigger('jump')
@@ -23,7 +21,6 @@ function resize() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   W = Math.floor(window.innerWidth * dpr);
   H = Math.floor(window.innerHeight * dpr);
-  canvas.width = W; canvas.height = H;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -80,13 +77,9 @@ function frame(now: number) {
   const t = now / 1000;
   ctrl.view.aspect = W / H;
 
-  gl.viewport(0, 0, W, H);
-  gl.clearColor(0.04, 0.08, 0.06, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-  forest.render(t, W, H);
 
   ctrl.update(dt, t);
-  psyduck.draw(ctrl.view);
+  artwork.draw(ctrl.view, W, H);
 
   // emotes (speech + sound) emitted by behaviors
   const emote = ctrl.takeEmote();

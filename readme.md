@@ -1,8 +1,8 @@
 # animar · Psyduck 🦆
 
-Un Psyduck de Pokémon renderizado en tiempo real en **frontend puro** (WebGL2),
+Un Psyduck de Pokémon dibujado con curvas vectoriales SVG en **frontend puro**,
 que reacciona al chat y genera su movimiento proceduralmente — sin frames
-pregrabados ni assets externos.
+pregrabados. El bosque es una ilustración SVG local.
 
 ## Qué hace
 
@@ -36,26 +36,22 @@ chat  →  intención  →  comportamiento  →  pose (rig+IK)  →  render (Web
 
 | Capa | Archivo | Qué hace |
 |------|---------|----------|
-| Render | `src/gl/`, `src/background/forest.ts` | Micro-engine WebGL2 + shader de bosque procedural (parallax, god rays, polen, neblina) |
+| Render | `src/vector/psyduck.ts`, `public/forest.svg` | Personaje vectorial animado + bosque ilustrado en capas |
 | Esqueleto | `src/rig/skeleton.ts` | Jerarquía de huesos 2D + matrices de skinning (linear blend) |
 | Mallas | `src/rig/mesh.ts`, `src/rig/shapes.ts` | Mallas generadas por código con skinning en CPU; sombreado que finge volumen (normal fake + rim light) y outline |
 | Físicas | `src/rig/spring.ts`, `src/rig/ik.ts` | Springs amortiguados (pelos/cola/bob) + IK analítica de 2 huesos |
-| Personaje | `src/character/psyduck.ts` | Ensambla el rig y las partes de Psyduck |
+| Personaje | `src/character/psyduck.ts` | Ensambla el rig; conserva el generador de mallas del render anterior |
 | Animación | `src/anim/controller.ts` | Máquina de estados de comportamientos con blending, locomoción, squash & stretch |
 | Cerebro | `src/brain/intent.ts` | Reglas/keywords + embeddings MiniLM (Transformers.js/WASM, lazy) |
 | UI | `src/ui/sound.ts`, `index.html`, `src/main.ts` | Chat, globo, sonido "psy" |
 
-### Por qué 2D procedural y no "monigote"
+### Estética vectorial
 
-El detalle que evita el look burdo: cada parte es una **malla deformable** cuyos
-vértices están pesados a varios huesos (las extremidades se doblan como goma, no
-giran en un pivote), el sombreado calcula un normal falso por fragmento para dar
-**volumen** real, hay **outline** tipo ilustración, y las físicas de resorte dan
-inercia/overshoot a pelos y cola. El esqueleto se mueve con IK, squash & stretch
-y anticipación — los principios clásicos de animación, en código.
+El render activo usa curvas Bézier SVG, colores planos y contornos oscuros.
+Las piezas siguen las matrices del esqueleto y los brazos se dibujan como curvas
+continuas entre hombro, codo y mano. Se conservan IK, resortes, parpadeo y
+squash & stretch. El render WebGL anterior permanece disponible en `src/gl/`,
+`src/rig/mesh.ts` y `src/background/forest.ts`, pero no se usa en la escena actual.
 
-## Decisiones
-
-- **WebGL2 puro** (sin framework) para control total del skinning y los shaders.
-- **Sin assets**: shapes y texturas son procedurales → cero copyright, todo editable.
-- **Cerebro offline**: MiniLM corre en el navegador; si no carga, cae a reglas.
+MiniLM se descarga al interactuar por primera vez; después puede aprovechar
+la caché del navegador. Si no carga, el chat sigue funcionando mediante reglas.
