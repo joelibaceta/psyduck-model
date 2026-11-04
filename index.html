@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Psyduck · animar</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; overflow: hidden; background: #0b141b; font-family: system-ui, sans-serif; }
+      #app { position: fixed; inset: 0; }
+      #scene { display: block; width: 100%; height: 100%; }
+
+      /* Chat UI */
+      #chat {
+        position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+        display: flex; gap: 8px; width: min(560px, 92vw); z-index: 10;
+      }
+      #chat input {
+        flex: 1; padding: 12px 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18);
+        background: rgba(10,20,28,.72); backdrop-filter: blur(8px);
+        color: #eaf4ff; font-size: 15px; outline: none;
+      }
+      #chat input::placeholder { color: rgba(234,244,255,.45); }
+      #chat button {
+        padding: 12px 18px; border-radius: 999px; border: none; cursor: pointer;
+        background: linear-gradient(135deg,#ffd25a,#ffac3b); color: #3a2400; font-weight: 700; font-size: 15px;
+      }
+      #chat button:active { transform: translateY(1px); }
+
+      /* Speech bubble */
+      #bubble {
+        position: fixed; z-index: 9; pointer-events: none;
+        padding: 10px 14px; border-radius: 16px; background: #fffbe9; color: #3a2400;
+        font-weight: 800; font-size: 18px; box-shadow: 0 6px 24px rgba(0,0,0,.35);
+        transform: translate(-50%, -100%) scale(0); transform-origin: 50% 120%;
+        transition: transform .18s cubic-bezier(.34,1.56,.64,1); white-space: nowrap;
+      }
+      #bubble.show { transform: translate(-50%, -100%) scale(1); }
+      #bubble::after {
+        content: ''; position: absolute; left: 50%; bottom: -8px; transform: translateX(-50%);
+        border: 8px solid transparent; border-top-color: #fffbe9; border-bottom: 0;
+      }
+
+      /* Loading / status chip */
+      #status {
+        position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 10;
+        padding: 7px 14px; border-radius: 999px; font-size: 13px; color: #cfe6ff;
+        background: rgba(10,20,28,.6); backdrop-filter: blur(6px); border: 1px solid rgba(255,255,255,.12);
+        transition: opacity .4s; opacity: 1;
+      }
+      #status.hide { opacity: 0; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="scene"></canvas>
+      <div id="bubble"></div>
+      <div id="status">iniciando…</div>
+      <form id="chat" autocomplete="off">
+        <input id="chat-input" type="text" placeholder="Háblale a Psyduck… (hola, camina, salta, tócate la cabeza)" />
+        <button type="submit">Enviar</button>
+      </form>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
