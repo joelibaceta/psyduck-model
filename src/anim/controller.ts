@@ -1,286 +1,272 @@
-// Animation controller: a behavior state machine that writes target bone poses,
-// eased each frame for smooth blending, with spring secondary motion (hair/tail),
-// IK limbs (walk steps, hands to head), squash & stretch and anticipation.
 import type { Psyduck } from '../character/psyduck';
 import type { StageView } from '../rig/mesh';
 import { Spring, smooth, clamp, lerp } from '../rig/spring';
 import { solveLimbDown } from '../rig/ik';
 
-export type Intent =
-  | 'idle' | 'walk_left' | 'walk_right' | 'jump'
-  | 'touch_head' | 'wave' | 'happy' | 'confused';
-
+export type Intent = 'idle' | 'walk_left' | 'walk_right' | 'jump' | 'touch_head' | 'wave' | 'happy' | 'confused';
 interface TP { dx: number; dy: number; drot: number; sx: number; sy: number; }
-
-const LEG_L1 = 0.27, LEG_L2 = 0.20;
-const ARM_L1 = 0.50, ARM_L2 = 0.42;
-const X_LIMIT = 2.5;
+const ease = (v: number) => { const x = clamp(v, 0, 1); return x * x * (3 - 2 * x); };
+const envelope = (t: number, duration: number, enter = .35, exit = .4) => ease(t / enter) * ease((duration - t) / exit);
+const EMOTES: Partial<Record<Intent, string>> = { wave: '¡Psy psy!', touch_head: 'psy… psy-duck…', happy: '¡Psy~! ♪', confused: '¿…psy?', jump: '¡Psy!' };
 
 export class Controller {
   private s: Psyduck['skel'];
   private B: Psyduck['B'];
-  private tp: TP[];                 // per-bone target pose (this frame)
+  private tp: TP[];
   view: StageView = {
     rootX: 0, rootY: 0, scaleX: 1, scaleY: 1, flip: 1,
-    unitsVisible: 8.6, aspect: 1, feetFrac: 0.24,
-    outlineW: 0.045, outlineColor: [0.12, 0.09, 0.07],
+    unitsVisible: 8.6, aspect: 1, feetFrac: .24,
+    outlineW: .045, outlineColor: [.12, .09, .07],
   };
-
   behavior: Intent = 'idle';
-  private phase = 0;                // seconds in current behavior
+  private phase = 0;
   private worldX = 0;
-  private facing = 1;
-
-  // springs (secondary motion)
-  private hair = [0, 1, 2].map(() => ({ base: new Spring(0, 90, 11), tip: new Spring(0, 70, 8) }));
-  private tail = new Spring(0, 80, 10);
-  private bob = new Spring(0, 160, 16);
-
-  // blink
-  private blinkT = 1.2; private blinkV = 1;
-
-  // walk target & IK memory
-  private hipL = { x: -0.33, y: 0.47 };
-  private hipR = { x: 0.33, y: 0.47 };
-  private shL = { x: -0.72, y: 1.6 };
-  private shR = { x: 0.72, y: 1.6 };
-  private prevRootX = 0; private prevRootY = 0;
-  private emote = ''; // emitted bubble text, read by UI
+  private velocity = 0;
+  private previousVelocity = 0;
+  private gait = 0;
+  private lift = 0;
+  private sx = 1;
+  private sy = 1;
+  private weight = 1;
+  private emote = '';
+  private pendingIntent: Intent | null = null;
+  private hair = [0, 1, 2].map(() => new Spring(0, 65, 10));
+  private tail = new Spring(0, 55, 9);
+  private bob = new Spring(0, 150, 21);
+  private blinkWait = 1.6;
+  private blinkPhase = -1;
 
   constructor(private p: Psyduck) {
-    this.s = p.skel;
-    this.B = p.B;
+    this.s = p.skel; this.B = p.B;
     this.tp = this.s.bones.map(() => ({ dx: 0, dy: 0, drot: 0, sx: 1, sy: 1 }));
+    this.s.update();
   }
-
-  takeEmote(): string { const e = this.emote; this.emote = ''; return e; }
-
+  takeEmote() { const result = this.emote; this.emote = ''; return result; }
   trigger(intent: Intent) {
-    if (intent === this.behavior && intent !== 'jump') {
-      // re-triggering walk just extends it; others restart
-      if (intent === 'walk_left' || intent === 'walk_right') { this.phase = 0; return; }
+    // Finish the landing before responding to another gesture.
+    if (this.behavior === 'jump' && this.phase < 1.25) {
+      this.pendingIntent = intent; return;
     }
-    this.behavior = intent;
-    this.phase = 0;
+    this.behavior = intent; this.phase = 0;
+    this.emote = EMOTES[intent] ?? '';
   }
-
-  private reset() {
-    for (const t of this.tp) { t.dx = 0; t.dy = 0; t.drot = 0; t.sx = 1; t.sy = 1; }
+  private rot(name: string, value: number) {
+    const pose = this.tp[this.B[name]];
+    pose.drot = lerp(pose.drot, value, this.weight);
   }
-  private rot(name: string, v: number) { this.tp[this.B[name]].drot = v; }
-  private scale(name: string, sx: number, sy: number) { const t = this.tp[this.B[name]]; t.sx = sx; t.sy = sy; }
-
-  private footIK(hip: { x: number; y: number }, upName: string, loName: string, tx: number, ty: number) {
-    const r = solveLimbDown(hip.x, hip.y, LEG_L1, LEG_L2, tx, ty, +1);
-    this.rot(upName, r.upper); this.rot(loName, r.lower);
+  private scale(name: string, x: number, y: number) {
+    const pose = this.tp[this.B[name]];
+    pose.sx = lerp(pose.sx, x, this.weight); pose.sy = lerp(pose.sy, y, this.weight);
   }
-  private handIK(sh: { x: number; y: number }, upName: string, foreName: string, tx: number, ty: number, bend: number) {
-    const r = solveLimbDown(sh.x, sh.y, ARM_L1, ARM_L2, tx, ty, bend);
-    this.rot(upName, r.upper); this.rot(foreName, r.lower);
+  /** Convert stage targets into the animated parent's space before solving IK. */
+  private limb(up: string, lo: string, x: number, y: number, l1: number, l2: number, bend: number) {
+    const bone = this.s.bone(up), parent = this.s.bones[bone.parent].world;
+    const det = parent[0] * parent[3] - parent[1] * parent[2];
+    const dx = x - parent[4], dy = y - parent[5];
+    const tx = (parent[3] * dx - parent[2] * dy) / det;
+    const ty = (-parent[1] * dx + parent[0] * dy) / det;
+    const angles = solveLimbDown(bone.rx, bone.ry, l1, l2, tx, ty, bend);
+    this.rot(up, angles.upper); this.rot(lo, angles.lower);
+  }
+  private foot(side: string, x: number, y: number, roll = 0) {
+    this.limb(`leg${side}_up`, `leg${side}_lo`, x, y, .27, .20, 1);
+    // Keep the broad webbed foot level instead of rotating it with the shin.
+    const up = this.tp[this.B[`leg${side}_up`]].drot;
+    const lo = this.tp[this.B[`leg${side}_lo`]].drot;
+    const pelvis = this.s.bone('pelvis').world;
+    this.rot(`leg${side}_ft`, roll - up - lo - Math.atan2(pelvis[1], pelvis[0]));
+  }
+  private hand(side: string, x: number, y: number) {
+    this.limb(`arm${side}_up`, `arm${side}_fore`, x, y, .5, .42, side === 'L' ? -1 : 1);
   }
 
   update(dt: number, t: number) {
-    this.phase += dt;
-    this.reset();
-    this.view.scaleX = smooth(this.view.scaleX, 1, 18, dt);
-    this.view.scaleY = smooth(this.view.scaleY, 1, 18, dt);
-
+    dt = clamp(dt, 0, .05);
+    this.phase += dt; this.weight = 1; this.lift = 0; this.sx = 1; this.sy = 1;
+    for (const pose of this.tp) Object.assign(pose, { dx: 0, dy: 0, drot: 0, sx: 1, sy: 1 });
+    this.idle(t);
+    this.locomotion(dt);
     switch (this.behavior) {
-      case 'walk_left': this.walk(dt, t, -1); break;
-      case 'walk_right': this.walk(dt, t, +1); break;
-      case 'jump': this.jump(t); break;
-      case 'touch_head': this.touchHead(t); break;
-      case 'wave': this.wave(t); break;
-      case 'happy': this.happy(t); break;
-      case 'confused': this.confused(t); break;
-      default: this.idle(t);
+      case 'jump': this.jump(); break;
+      case 'wave': this.wave(); break;
+      case 'touch_head': this.touchHead(); break;
+      case 'happy': this.happy(); break;
+      case 'confused': this.confused(); break;
     }
-
-    this.view.flip = this.facing;
-    this.view.rootX = this.worldX;
-
-    // ease bone poses toward target (smooth blending between behaviors)
-    const rate = 18;
-    for (let i = 0; i < this.s.bones.length; i++) {
-      const b = this.s.bones[i], g = this.tp[i];
-      b.pose.dx = smooth(b.pose.dx, g.dx, rate, dt);
-      b.pose.dy = smooth(b.pose.dy, g.dy, rate, dt);
-      b.pose.drot = smooth(b.pose.drot, g.drot, rate, dt);
-      b.pose.sx = smooth(b.pose.sx, g.sx, rate, dt);
-      b.pose.sy = smooth(b.pose.sy, g.sy, rate, dt);
-    }
-
-    this.secondaryMotion(dt, t);
-    this.doBlink(dt);
-
-    this.s.update();
-
-    // remember joint world positions for next frame's IK
-    const wp = (id: number, o: { x: number; y: number }) => { o.x = this.s.bones[id].world[4]; o.y = this.s.bones[id].world[5]; };
-    wp(this.B.legL_up, this.hipL); wp(this.B.legR_up, this.hipR);
-    wp(this.B.armL_up, this.shL); wp(this.B.armR_up, this.shR);
-
-    for (const part of this.p.parts) part.mesh.skin(this.s);
-    this.prevRootX = this.worldX; this.prevRootY = this.view.rootY;
-  }
-
-  // ---------- behaviors ----------
-  private idle(t: number) {
-    const breath = Math.sin(t * 1.8);
-    this.scale('chest', 1 - 0.02 * breath, 1 + 0.035 * breath);
-    this.scale('spine', 1, 1 + 0.02 * breath);
-    this.rot('neck', 0.04 * Math.sin(t * 1.0 + 0.5));
-    this.rot('head', 0.03 * Math.sin(t * 0.8));
-    this.rot('armL_up', 0.05 * Math.sin(t * 1.2) + 0.04);
-    this.rot('armR_up', -0.05 * Math.sin(t * 1.2) - 0.04);
-    this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, 0.0);
-    this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, 0.0);
-    this.bob.target = 0.03 * breath;
-  }
-
-  private walk(dt: number, t: number, dir: number) {
-    this.facing = dir;
-    const speed = 1.1;
-    const limit = Math.max(0, Math.min(X_LIMIT, this.view.unitsVisible * this.view.aspect / 2 - 1.4));
-    this.worldX = clamp(this.worldX + dir * speed * dt, -limit, limit);
-    if ((dir < 0 && this.worldX <= -limit) || (dir > 0 && this.worldX >= limit)) {
-      this.trigger('idle'); return;
-    }
-    const cad = 2.1;
-    const ph = t * cad * Math.PI * 2;
-    const stride = 0.22, lift = 0.17;
-    const legT = (p: number, hip: { x: number; y: number }, up: string, lo: string) => {
-      const fx = hip.x + Math.cos(p) * stride * dir;
-      const fy = Math.max(0, Math.sin(p)) * lift;
-      this.footIK(hip, up, lo, fx, fy);
-    };
-    legT(ph, this.hipL, 'legL_up', 'legL_lo');
-    legT(ph + Math.PI, this.hipR, 'legR_up', 'legR_lo');
-    // body bob (twice per stride) + forward lean
-    this.bob.target = 0.06 + 0.05 * Math.abs(Math.cos(ph));
-    this.rot('spine', 0.08 * dir);
-    this.rot('chest', 0.05 * dir);
-    this.rot('neck', -0.05 * dir);
-    // arm swing opposite to legs
-    this.rot('armL_up', 0.5 * Math.sin(ph + Math.PI) + 0.05);
-    this.rot('armR_up', 0.5 * Math.sin(ph) - 0.05);
-    this.rot('armL_fore', 0.2);
-    this.rot('armR_fore', 0.2);
-  }
-
-  private jump(t: number) {
-    const p = this.phase;
-    const dur = 0.95;
-    if (p >= dur) { this.trigger('idle'); return; }
-    if (p < 0.16) {               // anticipation crouch
-      const k = p / 0.16;
-      this.view.scaleX = lerp(1, 1.14, k); this.view.scaleY = lerp(1, 0.82, k);
-      this.bob.target = lerp(0, -0.12, k);
-      this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, 0.12);
-      this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, 0.12);
-    } else if (p < 0.66) {        // airborne arc
-      const u = (p - 0.16) / 0.5;
-      const h = Math.sin(u * Math.PI) * 1.25;
-      this.bob.target = h;
-      this.view.scaleX = lerp(1.14, 0.92, Math.min(1, u * 2)); this.view.scaleY = lerp(0.82, 1.12, Math.min(1, u * 2));
-      this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.3, -0.05);
-      this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.3, -0.05);
-      this.rot('armL_up', -1.4); this.rot('armR_up', 1.4);
-    } else {                      // land + recover
-      const k = (p - 0.66) / 0.29;
-      this.view.scaleX = lerp(1.18, 1, k); this.view.scaleY = lerp(0.8, 1, k);
-      this.bob.target = lerp(-0.1, 0, k);
-      this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, 0.0);
-      this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, 0.0);
-    }
-    void t;
-  }
-
-  private touchHead(t: number) {
-    if (this.phase >= 2.6) { this.trigger('idle'); return; }
-    const wob = Math.sin(t * 9) * (0.06 + 0.02 * Math.sin(t * 2));
-    // both hands pressed to the sides/top of head (the headache pose)
-    const hx = 0.46, hy = 2.95;
-    this.handIK(this.shL, 'armL_up', 'armL_fore', -hx + Math.sin(t * 8) * 0.02, hy, -1);
-    this.handIK(this.shR, 'armR_up', 'armR_fore', hx + Math.sin(t * 8) * 0.02, hy, +1);
-    this.rot('head', wob); this.rot('neck', wob * 0.5);
-    this.scale('chest', 1.03, 0.97);
-    this.bob.target = -0.04 + Math.sin(t * 4) * 0.02;
-    if (this.phase < 0.05) this.emote = 'psy… psy-duck…';
-  }
-
-  private wave(t: number) {
-    if (this.phase >= 2.2) { this.trigger('idle'); return; }
-    this.facing = 1;
-    const waveX = 0.95 + Math.sin(t * 10) * 0.18;
-    this.handIK(this.shR, 'armR_up', 'armR_fore', waveX, 3.0, +1);
-    this.rot('armL_up', 0.1);
-    this.rot('head', 0.05 * Math.sin(t * 3));
-    this.rot('neck', 0.06);
-    this.bob.target = 0.05 + 0.03 * Math.abs(Math.sin(t * 3));
-    this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, 0.0);
-    this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, 0.0);
-    if (this.phase < 0.05) this.emote = '¡Psy psy!';
-  }
-
-  private happy(t: number) {
-    if (this.phase >= 1.8) { this.trigger('idle'); return; }
-    const hop = Math.abs(Math.sin(this.phase * 7));
-    this.bob.target = hop * 0.35;
-    const squashed = hop < 0.15;
-    this.view.scaleY = squashed ? 0.9 : 1.05;
-    this.view.scaleX = squashed ? 1.08 : 0.97;
-    this.rot('armL_up', -1.2 + 0.2 * Math.sin(t * 12));
-    this.rot('armR_up', 1.2 - 0.2 * Math.sin(t * 12));
-    this.rot('head', 0.08 * Math.sin(t * 6));
-    const fy = Math.max(0, this.bob.target - 0.05);
-    this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, fy);
-    this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, fy);
-    if (this.phase < 0.05) this.emote = '¡Psy~! ♪';
-  }
-
-  private confused(t: number) {
-    if (this.phase >= 2.2) { this.trigger('idle'); return; }
-    this.rot('head', 0.35 * Math.sin(t * 2.5));
-    this.rot('neck', 0.18 * Math.sin(t * 2.5));
-    this.scale('chest', 0.98, 1.0);
-    this.rot('armL_up', 0.2); this.rot('armR_up', -0.2);
-    this.footIK(this.hipL, 'legL_up', 'legL_lo', -0.33, 0.0);
-    this.footIK(this.hipR, 'legR_up', 'legR_lo', 0.33, 0.0);
-    this.bob.target = 0;
-    if (this.phase < 0.05) this.emote = '¿…psy?';
-  }
-
-  // ---------- secondary motion & blink ----------
-  private secondaryMotion(dt: number, t: number) {
-    const velX = (this.worldX - this.prevRootX) / Math.max(dt, 1e-3);
-    const velY = (this.view.rootY - this.prevRootY) / Math.max(dt, 1e-3);
+    const priorY = this.view.rootY;
     this.bob.step(dt);
-    this.view.rootY = this.bob.value;
-
-    const breeze = Math.sin(t * 1.5) * 0.06;
-    const drag = -velX * 0.12 - velY * 0.05;
-    const names = [['hairL0', 'hairL1'], ['hairB0', 'hairB1'], ['hairR0', 'hairR1']];
-    for (let i = 0; i < 3; i++) {
-      const h = this.hair[i];
-      h.base.target = breeze * (1 + i * 0.1) + drag;
-      h.base.step(dt);
-      h.tip.target = h.base.value * 1.1;
-      h.tip.step(dt);
-      this.s.bone(names[i][0]).pose.drot += h.base.value;
-      this.s.bone(names[i][1]).pose.drot += h.tip.value;
+    this.view.rootY = this.bob.value + this.lift;
+    this.view.rootX = this.worldX;
+    this.view.scaleX = smooth(this.view.scaleX, this.sx, 20, dt);
+    this.view.scaleY = smooth(this.view.scaleY, this.sy, 20, dt);
+    // Head and arms settle slightly later than the torso.
+    for (let i = 0; i < this.s.bones.length; i++) {
+      const b = this.s.bones[i], goal = this.tp[i];
+      const rate = /head|neck/.test(b.name) ? 10 : /arm/.test(b.name) ? 14 : 22;
+      for (const key of ['dx', 'dy', 'drot', 'sx', 'sy'] as const) b.pose[key] = smooth(b.pose[key], goal[key], rate, dt);
     }
-    this.tail.target = -velX * 0.1 + Math.sin(t * 1.2) * 0.05;
-    this.tail.step(dt);
-    this.s.bone('tail').pose.drot += this.tail.value;
+    this.secondary(dt, t, (this.view.rootY - priorY) / Math.max(dt, .001));
+    this.blink(dt);
+    this.s.update();
+    for (const part of this.p.parts) part.mesh.skin(this.s);
   }
-
-  private doBlink(dt: number) {
-    // blinkV snaps to 0 (closed) on each trigger, then reopens to 1.
-    this.blinkT -= dt;
-    if (this.blinkT <= 0) { this.blinkT = 2 + Math.random() * 3; this.blinkV = 0; }
-    if (this.blinkV < 1) this.blinkV = Math.min(1, this.blinkV + dt * 10);
-    const openness = lerp(0.12, 1, this.blinkV);
+  private idle(t: number) {
+    const breath = Math.sin(t * 1.65);
+    this.scale('spine', 1 + .006 * breath, 1 + .01 * breath);
+    this.scale('chest', 1 - .006 * breath, 1 + .009 * breath);
+    this.rot('spine', .009 * Math.sin(t * .75));
+    this.rot('neck', .018 * Math.sin(t * .7 + .6));
+    this.rot('head', .025 * Math.sin(t * .53 + 1.2));
+    this.rot('armL_up', .04 + .018 * Math.sin(t * 1.65 - .6));
+    this.rot('armR_up', -.04 - .02 * Math.sin(t * 1.65 - .3));
+    this.bob.target = 0;
+    this.foot('L', -.33, -this.view.rootY);
+    this.foot('R', .33, -this.view.rootY);
+  }
+  private locomotion(dt: number) {
+    const dir = this.behavior === 'walk_left' ? -1 : this.behavior === 'walk_right' ? 1 : 0;
+    const limit = Math.max(0, Math.min(2.5, this.view.unitsVisible * this.view.aspect / 2 - 1.4));
+    const remaining = Math.max(0, limit - this.worldX * dir);
+    const desired = dir * Math.min(.85, Math.sqrt(2 * 1.8 * remaining));
+    this.velocity = smooth(this.velocity, desired, dir ? 4 : 7, dt);
+    const next = this.worldX + this.velocity * dt;
+    this.worldX = clamp(next, -limit, limit);
+    if (next !== this.worldX || (dir && remaining < .012 && Math.abs(this.velocity) < .12)) {
+      this.velocity = 0;
+      if (dir) this.trigger('idle');
+    }
+    const speed = Math.abs(this.velocity);
+    this.gait += speed * .62 / .48 * dt;
+    if (speed < .008) return;
+    const ph = this.gait * Math.PI * 2;
+    const amount = ease(speed / .5);
+    this.weight = amount;
+    for (const [side, offset, hip] of [['L', 0, -.33], ['R', .5, .33]] as const) {
+      const cycle = (this.gait + offset) % 1;
+      const stance = cycle < .62;
+      const u = stance ? cycle / .62 : (cycle - .62) / .38;
+      const stride = stance ? lerp(.24, -.24, u) : lerp(-.24, .24, ease(u));
+      const height = stance ? -this.view.rootY : Math.sin(Math.PI * u) * .12 - this.view.rootY;
+      this.foot(side, hip + stride * Math.sign(this.velocity), height, stance ? 0 : -.13 * Math.sin(Math.PI * u));
+    }
+    this.rot('pelvis', .045 * Math.sin(ph));
+    this.rot('spine', -.028 * Math.sin(ph) - .035 * this.velocity);
+    this.rot('neck', .025 * Math.sin(ph - .4));
+    this.rot('head', .035 * Math.sin(ph - .7));
+    this.rot('armL_up', .22 * Math.sin(ph) + .06);
+    this.rot('armR_up', -.22 * Math.sin(ph + .2) - .06);
+    this.rot('armL_fore', .05 + .08 * Math.sin(ph - .5));
+    this.rot('armR_fore', -.05 - .08 * Math.sin(ph - .3));
+    this.bob.target = amount * (.018 - .018 * Math.cos(ph * 2));
+    this.weight = 1;
+  }
+  private jump() {
+    const p = this.phase;
+    if (p >= 1.25) {
+      const next = this.pendingIntent ?? 'idle'; this.pendingIntent = null;
+      this.trigger(next); return;
+    }
+    if (p < .24) {
+      const crouch = ease(p / .24);
+      this.sx = 1 + .09 * crouch; this.sy = 1 - .12 * crouch;
+      this.bob.target = -.045 * crouch;
+      this.rot('armL_up', .25 * crouch); this.rot('armR_up', -.25 * crouch);
+    } else if (p < .84) {
+      const u = (p - .24) / .6;
+      this.lift = 4 * .85 * u * (1 - u);
+      this.bob.target = 0;
+      const launch = ease(u / .13);
+      const stretch = Math.exp(-Math.max(0, u - .13) * 9);
+      this.sx = lerp(1.09, 1 - .055 * stretch, launch);
+      this.sy = lerp(.88, 1 + .075 * stretch, launch);
+      this.rot('armL_up', -.8 * Math.sin(Math.PI * u)); this.rot('armR_up', .8 * Math.sin(Math.PI * u));
+      this.foot('L', -.33, .1 * Math.sin(Math.PI * u), -.08);
+      this.foot('R', .33, .1 * Math.sin(Math.PI * u), .08);
+      this.rot('head', -.065 * Math.sin(Math.PI * u));
+    } else {
+      const u = (p - .84) / .41;
+      const impact = Math.sin(Math.PI * ease(u));
+      this.sx = 1 + .11 * impact; this.sy = 1 - .13 * impact;
+      this.bob.target = -.04 * impact;
+      this.rot('neck', .08 * impact);
+    }
+  }
+  private wave() {
+    const p = this.phase;
+    if (p >= 2.6) { this.trigger('idle'); return; }
+    this.weight = envelope(p, 2.6, .48, .55);
+    const wave = Math.sin(Math.max(0, p - .4) * 8.5);
+    this.hand('R', 1.01 + .15 * wave, 2.39 + .055 * Math.cos(p * 8.5));
+    this.rot('armL_up', .12); this.rot('neck', -.045);
+    this.rot('head', -.06 + .025 * Math.sin(p * 3));
+    this.rot('spine', -.025);
+    this.weight = 1;
+  }
+  private touchHead() {
+    const p = this.phase;
+    if (p >= 3.2) { this.trigger('idle'); return; }
+    this.weight = envelope(p, 3.2, .65, .65);
+    this.hand('L', -.65, 2.43); this.hand('R', .65, 2.43);
+    this.rot('neck', .025 * Math.sin(p * 4));
+    this.rot('head', .065 * Math.sin(p * 4 - .4));
+    this.scale('chest', 1.015, .985);
+    this.weight = 1;
+  }
+  private happy() {
+    const p = this.phase;
+    if (p >= 3) { this.trigger('idle'); return; }
+    const amount = envelope(p, 3, .4, .6);
+    this.weight = amount;
+    const ph = p * 6;
+    this.rot('pelvis', .055 * Math.sin(ph));
+    this.rot('spine', -.065 * Math.sin(ph));
+    this.rot('head', .09 * Math.sin(ph - .6));
+    this.rot('armL_up', -.7 + .18 * Math.sin(ph - .4));
+    this.rot('armR_up', .7 + .18 * Math.sin(ph + .4));
+    this.foot('L', -.33, .065 * Math.max(0, Math.sin(ph)) - this.view.rootY);
+    this.foot('R', .33, .065 * Math.max(0, -Math.sin(ph)) - this.view.rootY);
+    this.bob.target = amount * .035 * (1 - Math.cos(ph * 2));
+    this.sx = 1 + .018 * amount * Math.cos(ph * 2);
+    this.sy = 1 - .018 * amount * Math.cos(ph * 2);
+    this.weight = 1;
+  }
+  private confused() {
+    const p = this.phase;
+    if (p >= 2.8) { this.trigger('idle'); return; }
+    this.weight = envelope(p, 2.8, .5, .65);
+    // Look, pause to think, then a smaller corrective tilt.
+    const tilt = p < 1.4 ? .22 : lerp(.22, -.11, ease((p - 1.4) / .5));
+    this.rot('head', tilt); this.rot('neck', tilt * .25);
+    this.rot('armL_up', .12); this.rot('armR_up', -.08);
+    this.weight = 1;
+  }
+  private secondary(dt: number, t: number, verticalVelocity: number) {
+    const acceleration = (this.velocity - this.previousVelocity) / Math.max(dt, .001);
+    this.previousVelocity = this.velocity;
+    const drag = clamp(-acceleration * .025 - verticalVelocity * .035, -.22, .22);
+    for (const [i, name] of ['hairL0', 'hairB0', 'hairR0'].entries()) {
+      const spring = this.hair[i];
+      spring.target = drag + .018 * Math.sin(t * 1.3 + i * .6);
+      spring.step(dt);
+      // Add to the freshly smoothed pose, never to last frame's secondary offset.
+      this.s.bone(name).pose.drot = this.tp[this.B[name]].drot + spring.value;
+    }
+    this.tail.target = -.035 * acceleration + .028 * Math.sin(t * 1.1);
+    this.tail.step(dt);
+    this.s.bone('tail').pose.drot = this.tp[this.B.tail].drot + this.tail.value;
+  }
+  private blink(dt: number) {
+    if (this.blinkPhase < 0) {
+      this.blinkWait -= dt;
+      if (this.blinkWait <= 0) this.blinkPhase = 0;
+    }
+    let openness = 1;
+    if (this.blinkPhase >= 0) {
+      this.blinkPhase += dt;
+      const p = this.blinkPhase;
+      openness = p < .065 ? lerp(1, .08, ease(p / .065)) : lerp(.08, 1, ease((p - .065) / .13));
+      if (p >= .195) { this.blinkPhase = -1; this.blinkWait = 2.2 + Math.random() * 3.5; }
+    }
     this.s.bone('eyeL').pose.sy = openness;
     this.s.bone('eyeR').pose.sy = openness;
   }
